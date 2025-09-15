@@ -6,7 +6,6 @@
 
 enum ChannelState {
   CHANNEL_IDLE,
-  LED_ON,
   DELAY_COUNTING,
   ADC_READING_PHASE,
   CYCLE_COMPLETE
@@ -28,7 +27,8 @@ struct sistem {
   ChannelData channels[4];
   int currentChannel;
   bool systemEnabled;
-  volatile bool timerExpired;
+  volatile bool timer1Expired;
+  volatile bool timer2Expired;
   String rxBuffer;
   bool jsonCallback;
 };

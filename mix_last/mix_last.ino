@@ -13,7 +13,8 @@ sistem mysistem;
 
 void setup() {
   Serial.begin(9600);
-  while(!Serial);
+  while (!Serial)
+    ;
   Serial.println("Program basladi");
 
   // Initialize BLE
@@ -23,52 +24,52 @@ void setup() {
   Bluefruit.setTxPower(4);
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
-  
+
   bledfu.begin();
   bledis.setManufacturer("Adafruit Industries");
   bledis.setModel("Bluefruit Feather52");
   bledis.begin();
-  
+
   bleuart.begin();
   bleuart.setRxCallback(uart_rx_callback);
-  
+
   blebas.begin();
   blebas.write(100);
-  
+
   startAdv();
   timer1_init();
-  
+
   // Initialize system components
   mysistem.myLeds.begin();
   mysistem.myAds.begin();
-  
+
   // Initialize system state
-  for(int i = 0; i < 4; i++) {
+  for (int i = 0; i < 4; i++) {
     mysistem.channels[i].state = CHANNEL_IDLE;
     mysistem.channels[i].processComplete = false;
   }
   mysistem.currentChannel = 0;
   mysistem.systemEnabled = false;
-  mysistem.timerExpired = false;
+  mysistem.timer1Expired = false;
   mysistem.rxBuffer = "";
   mysistem.jsonCallback = false;
 }
 
 void loop() {
-  if(!mysistem.myAds.is_adc_started) {
+  if (!mysistem.myAds.is_adc_started) {
     mysistem.myAds.begin();
   }
 
   if (Bluefruit.connected()) {
     handleBleMessages();
-    digitalWrite(22, LOW); // Bluetooth connected indicator
+    digitalWrite(22, LOW);  // Bluetooth connected indicator
 
-    if(mysistem.systemEnabled) {
+    if (mysistem.systemEnabled) {
       processCurrentChannel();
     }
   } else {
     // Bluetooth not connected
-    if(mysistem.myAds.is_adc_started){
+    if (mysistem.myAds.is_adc_started) {
       digitalWrite(LED_BUILTIN, HIGH);
     }
   }
@@ -76,29 +77,25 @@ void loop() {
 
 void processCurrentChannel() {
   ChannelData& current = mysistem.channels[mysistem.currentChannel];
-  
-  if(!mysistem.myAds.read_state[mysistem.currentChannel]) {
+
+  if (!mysistem.myAds.read_state[mysistem.currentChannel]) {
     advanceToNextChannel();
     return;
   }
 
-  switch(current.state) {
+  switch (current.state) {
     case CHANNEL_IDLE:
       startChannelProcessing(current);
       break;
-      
-    case LED_ON:
-      handleLedOnState(current);
-      break;
-      
+
     case DELAY_COUNTING:
       handleDelayCounting(current);
       break;
-      
+
     case ADC_READING_PHASE:
       handleAdcReading(current);
       break;
-      
+
     case CYCLE_COMPLETE:
       completeChannelProcessing(current);
       break;
@@ -106,41 +103,44 @@ void processCurrentChannel() {
 }
 
 void startChannelProcessing(ChannelData& channel) {
-  channel.state = LED_ON;
+  channel.state = DELAY_COUNTING;
   channel.processComplete = false;
-  
+
   // Start LED timer
   NRF_TIMER1->CC[0] = mysistem.myLeds.leds[mysistem.currentChannel].kalansure * 1000;
   NRF_TIMER1->TASKS_START = 1;
-  
+  //start 
+  NRF_TIMER2->CC[0] = mysistem.myAds.adc_delay[mysistem.currentChannel] * 1000;//delay kontroller
+  NRF_TIMER2->TASKS_START = 1;
+
   digitalWrite(mysistem.currentChannel + 4, HIGH);
-  channel.startTime = millis();
 }
 
 void handleLedOnState(ChannelData& channel) {
-  if(mysistem.timerExpired) {
-    mysistem.timerExpired = false;
+  if (mysistem.timer1Expired) {
+    mysistem.timer1Expired = false;
     digitalWrite(mysistem.currentChannel + 4, LOW);
-    channel.state = DELAY_COUNTING;
-    channel.startTime = millis();
   }
 }
 
 void handleDelayCounting(ChannelData& channel) {
-  if(millis() - channel.startTime >= mysistem.myAds.adc_delay[mysistem.currentChannel]) {
+  handleLedOnState(channel);
+  if (mysistem.timer2Expired) {
     channel.state = ADC_READING_PHASE;
-    channel.startTime = millis();
     channel.adcAccumulator = 0;
     channel.adcReadCount = 0;
+    NRF_TIMER2->CC[0] = mysistem.myAds.adc_delay[mysistem.currentChannel] * 1000;
+    NRF_TIMER2->TASKS_START = 1;
   }
 }
 
 void handleAdcReading(ChannelData& channel) {
-  if(millis() - channel.startTime < mysistem.myAds.adc_readtime[mysistem.currentChannel]) {
+  handleLedOnState(channel);
+  if (!mysistem.timer2Expired) {
     channel.adcAccumulator += mysistem.myAds.ads.readADC_SingleEnded(mysistem.currentChannel);
     channel.adcReadCount++;
   } else {
-    if(channel.adcReadCount > 0) {
+    if (channel.adcReadCount > 0) {
       mysistem.myAds.adc[mysistem.currentChannel] = channel.adcAccumulator / channel.adcReadCount;
     } else {
       mysistem.myAds.adc[mysistem.currentChannel] = 0;
@@ -150,13 +150,15 @@ void handleAdcReading(ChannelData& channel) {
 }
 
 void completeChannelProcessing(ChannelData& channel) {
-  String jsonPayload = makeJsonPayload(mysistem.myAds.adc);
-  sendJsonPayload(jsonPayload);
-  
-  channel.state = CHANNEL_IDLE;
-  channel.processComplete = true;
-  
-  advanceToNextChannel();
+  if (mysistem.timer1Expired) {
+    String jsonPayload = makeJsonPayload(mysistem.myAds.adc);
+    sendJsonPayload(jsonPayload);
+
+    channel.state = CHANNEL_IDLE;
+    channel.processComplete = true;
+
+    advanceToNextChannel();
+  }
 }
 
 void advanceToNextChannel() {
@@ -184,7 +186,7 @@ String makeJsonPayload(int values[4]) {
   return s;
 }
 
-void sendJsonPayload(const String &payload) {
+void sendJsonPayload(const String& payload) {
   bleuart.write((uint8_t*)payload.c_str(), payload.length());
 }
 
@@ -195,12 +197,12 @@ void connect_callback(uint16_t conn_handle) {
   connection->getPeerName(central_name, sizeof(central_name));
   Serial.print("Connected to ");
   Serial.println(central_name);
-  mysistem.myLeds.leds[4].counter = 0; // Reset built-in LED counter
+  mysistem.myLeds.leds[4].counter = 0;  // Reset built-in LED counter
 }
 
 void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
-  (void) conn_handle;
-  (void) reason;
+  (void)conn_handle;
+  (void)reason;
   Serial.println();
   Serial.print("Disconnected, reason = 0x");
   Serial.println(reason, HEX);
@@ -218,25 +220,25 @@ void startAdv(void) {
 }
 
 void uart_rx_callback(uint16_t conn_handle) {
-  (void) conn_handle;
+  (void)conn_handle;
   static bool json_started = false;
   static int brace_count = 0;
 
   while (bleuart.available()) {
     char c = (char)bleuart.read();
-    
+
     if (c == '{' && !json_started) {
       json_started = true;
       brace_count = 0;
       mysistem.rxBuffer = "";
     }
-    
+
     if (json_started) {
       mysistem.rxBuffer += c;
-      
+
       if (c == '{') brace_count++;
       if (c == '}') brace_count--;
-      
+
       if (brace_count == 0 && mysistem.rxBuffer.length() > 2) {
         mysistem.jsonCallback = true;
         json_started = false;
@@ -247,7 +249,7 @@ void uart_rx_callback(uint16_t conn_handle) {
 }
 
 void handleBleMessages() {
-  if(mysistem.jsonCallback) {
+  if (mysistem.jsonCallback) {
     mysistem.rxBuffer.trim();
     parseJsonBuffer(mysistem.rxBuffer);
     mysistem.rxBuffer = "";
@@ -255,12 +257,12 @@ void handleBleMessages() {
   }
 }
 
-void parseJsonBuffer(const String &buffer) {
+void parseJsonBuffer(const String& buffer) {
   if (buffer.length() == 0) return;
 
   String cleanBuffer = buffer;
   cleanBuffer.trim();
-  
+
   StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, cleanBuffer);
 
@@ -292,7 +294,7 @@ void parseJsonBuffer(const String &buffer) {
         mysistem.myAds.adc_delay[pin] = delayMs;
         mysistem.myAds.adc_readtime[pin] = readMs;
         mysistem.myAds.read_state[pin] = enabled;
-        
+
         if (enabled) {
           mysistem.systemEnabled = true;
           mysistem.channels[pin].state = CHANNEL_IDLE;
@@ -307,11 +309,17 @@ extern "C" void TIMER1_IRQHandler(void) {
   if (NRF_TIMER1->EVENTS_COMPARE[0]) {
     NRF_TIMER1->TASKS_STOP = 1;
     NRF_TIMER1->EVENTS_COMPARE[0] = 0;
-    mysistem.timerExpired = true;
+    mysistem.timer1Expired = true;
   }
 }
 
-extern "C"
+extern "C" void TIMER2_IRQHandler(void) {
+  if (NRF_TIMER2->EVENTS_COMPARE[0]) {
+    NRF_TIMER2->TASKS_STOP = 1;
+    NRF_TIMER2->EVENTS_COMPARE[0] = 0;
+    mysistem.timer2Expired = true;
+  }
+}
 
 void timer1_init() {
   NRF_TIMER1->TASKS_STOP = 1;
@@ -323,4 +331,16 @@ void timer1_init() {
   NRF_TIMER1->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Enabled << TIMER_SHORTS_COMPARE0_CLEAR_Pos;
 
   NVIC_EnableIRQ(TIMER1_IRQn);
+}
+
+void timer2_init() {
+  NRF_TIMER2->TASKS_STOP = 1;
+  NRF_TIMER2->MODE = TIMER_MODE_MODE_Timer;
+  NRF_TIMER2->BITMODE = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
+  NRF_TIMER2->PRESCALER = 4;
+
+  NRF_TIMER2->INTENSET = TIMER_INTENSET_COMPARE0_Enabled << TIMER_INTENSET_COMPARE0_Pos;
+  NRF_TIMER2->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Enabled << TIMER_SHORTS_COMPARE0_CLEAR_Pos;
+
+  NVIC_EnableIRQ(TIMER2_IRQn);
 }
