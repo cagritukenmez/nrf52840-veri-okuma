@@ -43,17 +43,12 @@ void setup() {
   // Initialize system components
   mysistem.myLeds.begin();
   mysistem.myAds.begin();
-
+  
   // Initialize system state
   for (int i = 0; i < 4; i++) {
     mysistem.channels[i].state = CHANNEL_IDLE;
     mysistem.channels[i].processComplete = false;
   }
-  mysistem.currentChannel = 0;
-  mysistem.systemEnabled = false;
-  mysistem.timer1Expired = false;
-  mysistem.rxBuffer = "";
-  mysistem.jsonCallback = false;
 }
 
 void loop() {
@@ -69,10 +64,12 @@ void loop() {
       processCurrentChannel();
     }
   } else {
-    // Bluetooth not connected
     if (mysistem.myAds.is_adc_started) {
       digitalWrite(LED_BUILTIN, HIGH);
     }
+    handleChill();
+    // Bluetooth not connected
+    
   }
 }
 
@@ -113,7 +110,7 @@ void startChannelProcessing(ChannelData& channel) {
   NRF_TIMER1->CC[0] = mysistem.myLeds.leds[mysistem.currentChannel].kalansure * 1000;
   NRF_TIMER1->TASKS_START = 1;
   //start 
-  NRF_TIMER2->CC[0] = mysistem.myAds.adc_delay[mysistem.currentChannel] * 1000;//delay kontroller
+  NRF_TIMER2->CC[0] = mysistem.myAds.adc_delay[mysistem.currentChannel] * 1000;//delay controller
   NRF_TIMER2->TASKS_START = 1;
 
   digitalWrite(mysistem.currentChannel + 4, HIGH);
@@ -267,7 +264,7 @@ void parseJsonBuffer(const String& buffer) {
 
   String cleanBuffer = buffer;
   cleanBuffer.trim();
-
+  Serial.print(cleanBuffer);
   StaticJsonDocument<2048> doc;
   DeserializationError err = deserializeJson(doc, cleanBuffer);
 
@@ -301,12 +298,20 @@ void parseJsonBuffer(const String& buffer) {
         mysistem.myAds.read_state[pin] = enabled;
 
         if (enabled) {
-          mysistem.systemEnabled = true;
           mysistem.channels[pin].state = CHANNEL_IDLE;
         }
       }
     }
   }
+}
+
+void handleChill(){
+  //timerları durdur.
+  
+  if(digitalRead(mysistem.currentChannel))digitalWrite(mysistem.currentChannel+4,LOW);
+  NRF_TIMER1->TASKS_STOP = 1;
+  NRF_TIMER2->TASKS_STOP = 1;
+  sd_app_evt_wait();
 }
 
 // Timer interrupt handler
@@ -317,6 +322,7 @@ extern "C" void TIMER1_IRQHandler(void) {
     mysistem.timer1Expired = true;
   }
 }
+
 
 extern "C" void TIMER2_IRQHandler(void) {
   if (NRF_TIMER2->EVENTS_COMPARE[0]) {
