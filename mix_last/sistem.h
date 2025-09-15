@@ -21,16 +21,16 @@ struct ChannelData {
 
 struct sistem {
   String SisteminAdi;
-  String versiyon;
+  String versiyon="version 1.0";
   ads1115 myAds;
   ledController myLeds;
   ChannelData channels[4];
-  int currentChannel;
-  bool systemEnabled;
-  volatile bool timer1Expired;
-  volatile bool timer2Expired;
-  String rxBuffer;
-  bool jsonCallback;
+  int currentChannel=0;
+  bool systemEnabled=false;
+  volatile bool timer1Expired=false;
+  volatile bool timer2Expired=false;
+  String rxBuffer="";
+  bool jsonCallback=false;
 };
 
 #endif

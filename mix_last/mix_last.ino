@@ -38,6 +38,7 @@ void setup() {
 
   startAdv();
   timer1_init();
+  timer2_init();
 
   // Initialize system components
   mysistem.myLeds.begin();
@@ -105,6 +106,8 @@ void processCurrentChannel() {
 void startChannelProcessing(ChannelData& channel) {
   channel.state = DELAY_COUNTING;
   channel.processComplete = false;
+  mysistem.timer1Expired=false;
+  mysistem.timer2Expired = true;
 
   // Start LED timer
   NRF_TIMER1->CC[0] = mysistem.myLeds.leds[mysistem.currentChannel].kalansure * 1000;
@@ -118,7 +121,6 @@ void startChannelProcessing(ChannelData& channel) {
 
 void handleLedOnState(ChannelData& channel) {
   if (mysistem.timer1Expired) {
-    mysistem.timer1Expired = false;
     digitalWrite(mysistem.currentChannel + 4, LOW);
   }
 }
@@ -129,7 +131,9 @@ void handleDelayCounting(ChannelData& channel) {
     channel.state = ADC_READING_PHASE;
     channel.adcAccumulator = 0;
     channel.adcReadCount = 0;
-    NRF_TIMER2->CC[0] = mysistem.myAds.adc_delay[mysistem.currentChannel] * 1000;
+
+    mysistem.timer2Expired=false;
+    NRF_TIMER2->CC[0] = mysistem.myAds.adc_readtime[mysistem.currentChannel] * 1000;
     NRF_TIMER2->TASKS_START = 1;
   }
 }
@@ -150,10 +154,11 @@ void handleAdcReading(ChannelData& channel) {
 }
 
 void completeChannelProcessing(ChannelData& channel) {
+  handleLedOnState(channel);
   if (mysistem.timer1Expired) {
     String jsonPayload = makeJsonPayload(mysistem.myAds.adc);
     sendJsonPayload(jsonPayload);
-
+    
     channel.state = CHANNEL_IDLE;
     channel.processComplete = true;
 
