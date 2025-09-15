@@ -1,71 +1,57 @@
 #include "ads.h"
-#include "ledController.h"
 #include "sistem.h"
 #include <bluefruit.h>
-#include <Adafruit_LittleFS.h>
-#include <InternalFileSystem.h>
 #include <ArduinoJson.h>
 
-// BLE Service
-BLEDfu  bledfu;  // OTA DFU service
-BLEDis  bledis;  // device information
-BLEUart bleuart; // uart over ble
-BLEBas  blebas;  // battery
+// BLE Services
+BLEDfu bledfu;
+BLEDis bledis;
+BLEUart bleuart;
+BLEBas blebas;
 
-extern sistem mysistem;
+sistem mysistem;
 
-ledController myleds;
-
-struct data_box{
-  bool state;
-  uint32_t time_open;
-  uint32_t time_delay;
-  uint16_t time_read;
-  int8_t pin;
-}data_box[4];
-
-
-unsigned long baslangiczamani;
-unsigned long prev;
-unsigned long json_delay = 20; //ms cinsinden belirli sürede bir json gönderme ayarı, şuanda kullanım dışı.
-unsigned long adc_toplayici=0;
-int adc_read_counter=0;
-int itr=0;
-
-bool dongu_led[4]={0,0,0,0};
-bool dongu_delay[4]={0,0,0,0};
-bool dongu_read_finish[4]={0,0,0,0};
-bool callback=false;
-bool starter_controller=false;
-
-String rxBuffer = "";           // Gelen parçaları biriktirir
-String gonderilecek_json="";
 void setup() {
   Serial.begin(9600);
-  while(!Serial); // bazı nRF kartlarda gerekli
-  printResetReason();
+  while(!Serial);
   Serial.println("Program basladi");
 
-  Serial.println("Bluefruit52 BLEUART JSON sender");//checkpoint 1
+  // Initialize BLE
   Bluefruit.autoConnLed(true);
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin();
   Bluefruit.setTxPower(4);
   Bluefruit.Periph.setConnectCallback(connect_callback);
   Bluefruit.Periph.setDisconnectCallback(disconnect_callback);
+  
   bledfu.begin();
   bledis.setManufacturer("Adafruit Industries");
   bledis.setModel("Bluefruit Feather52");
   bledis.begin();
+  
   bleuart.begin();
-  Serial.println("Bluefruit52 BLEUART JSON sender");//checkpoint 2
-  bleuart.setRxCallback(uart_rx_callback);//her veri gelişinde bu fonksiyon çalışır
+  bleuart.setRxCallback(uart_rx_callback);
+  
   blebas.begin();
   blebas.write(100);
+  
   startAdv();
-
-  myleds.begin();
+  timer1_init();
+  
+  // Initialize system components
+  mysistem.myLeds.begin();
   mysistem.myAds.begin();
+  
+  // Initialize system state
+  for(int i = 0; i < 4; i++) {
+    mysistem.channels[i].state = CHANNEL_IDLE;
+    mysistem.channels[i].processComplete = false;
+  }
+  mysistem.currentChannel = 0;
+  mysistem.systemEnabled = false;
+  mysistem.timerExpired = false;
+  mysistem.rxBuffer = "";
+  mysistem.jsonCallback = false;
 }
 
 void loop() {
@@ -74,134 +60,153 @@ void loop() {
   }
 
   if (Bluefruit.connected()) {
-    myleds.update(itr);
-    digitalWrite(22,LOW);
-    if(callback){
-      rxBuffer.trim();
-      Serial.print(rxBuffer);
-      parseJsonBuffer(rxBuffer);
-      rxBuffer="";
-      Serial.print("cp  7");
-      callback=false;
+    handleBleMessages();
+    digitalWrite(22, LOW); // Bluetooth connected indicator
+
+    if(mysistem.systemEnabled) {
+      processCurrentChannel();
     }
-
-
-    if(mysistem.state && mysistem.myAds.read_state[itr]){
-      //itr ile döngüyü kontrol et 3 bool tipi ile kontrolü sağla 
-      if(!dongu_led[itr] && !dongu_delay[itr] && !dongu_read_finish[itr] && !starter_controller){
-        //en başta buraya girer ve başlangıç ayarları yapılır.
-        starter_controller =true;
-        myleds.toggleFlag[itr]=true;
-        prev=millis();
-        timer_start_handle(itr);
-        Serial.print("cp1 ");
-        adc_read_counter =0;
-        adc_toplayici=0;
-      }
-
-      if(dongu_delay[itr] && !dongu_read_finish[itr]){
-        //delay işlemi bittiyse içeri girer ve her bir loopta okuma yapar.
-        
-        
-        if(millis()- baslangiczamani < mysistem.myAds.adc_readtime[itr]){//readtime kadar okur
-          adc_toplayici += mysistem.myAds.ads.readADC_SingleEnded(itr);//adc okuma kısmı
-          adc_read_counter++;
-        }else {
-          dongu_read_finish[itr]=true;
-          mysistem.myAds.adc[itr]=adc_toplayici/adc_read_counter;
-          gonderilecek_json = makeJsonPayload(mysistem.myAds.adc);
-          sendJsonPayload(gonderilecek_json);
-          Serial.print(gonderilecek_json);
-          Serial.print(itr);
-        }
-      }
-      else{//dongu delay süreci
-        if(millis()-prev > mysistem.myAds.adc_delay[itr]){
-          //delay süresi bittiyse dongu_delay[itr] true yap. ve okuma işlemi başlayabilir.
-          dongu_delay[itr]=true;
-          baslangiczamani = millis();
-        }
-      }
-      if(dongu_led[itr] && dongu_delay[itr] && dongu_read_finish[itr]){
-        dongu_led[itr]=false;
-        dongu_delay[itr]=false;
-        dongu_read_finish[itr]=false;
-        starter_controller=false;
-        timer_stop_handle(itr);//timer sıfırla, timer durdur
-        if(itr == 3)itr=0;
-        else itr++;
-        Serial.print("cp4");//debug
-      }
-    }
-    
-
-    
-    
-  }else{
-    //ble bağlantısı yoksa
+  } else {
+    // Bluetooth not connected
     if(mysistem.myAds.is_adc_started){
-      //bluetooth bağlantısı gerçekleşmemiştir bunun anlaşılabilir olması için ve adc ile kart arassında I2C haberleşmesinin başladığını kabul ederek
-      //adc led debugging metodu ile karışmaması için LED sürekli yanar eğer bluetooth bağlantısı yoksa.
-      digitalWrite(LED_BUILTIN,HIGH);
+      digitalWrite(LED_BUILTIN, HIGH);
     }
-    
   }
-  if(digitalRead(itr+4) == HIGH)dongu_led[itr]=true;
-
-
 }
 
-String makeJsonPayload(int values[4]) { // Fixed parameter types
+void processCurrentChannel() {
+  ChannelData& current = mysistem.channels[mysistem.currentChannel];
+  
+  if(!mysistem.myAds.read_state[mysistem.currentChannel]) {
+    advanceToNextChannel();
+    return;
+  }
+
+  switch(current.state) {
+    case CHANNEL_IDLE:
+      startChannelProcessing(current);
+      break;
+      
+    case LED_ON:
+      handleLedOnState(current);
+      break;
+      
+    case DELAY_COUNTING:
+      handleDelayCounting(current);
+      break;
+      
+    case ADC_READING_PHASE:
+      handleAdcReading(current);
+      break;
+      
+    case CYCLE_COMPLETE:
+      completeChannelProcessing(current);
+      break;
+  }
+}
+
+void startChannelProcessing(ChannelData& channel) {
+  channel.state = LED_ON;
+  channel.processComplete = false;
+  
+  // Start LED timer
+  NRF_TIMER1->CC[0] = mysistem.myLeds.leds[mysistem.currentChannel].kalansure * 1000;
+  NRF_TIMER1->TASKS_START = 1;
+  
+  digitalWrite(mysistem.currentChannel + 4, HIGH);
+  channel.startTime = millis();
+}
+
+void handleLedOnState(ChannelData& channel) {
+  if(mysistem.timerExpired) {
+    mysistem.timerExpired = false;
+    digitalWrite(mysistem.currentChannel + 4, LOW);
+    channel.state = DELAY_COUNTING;
+    channel.startTime = millis();
+  }
+}
+
+void handleDelayCounting(ChannelData& channel) {
+  if(millis() - channel.startTime >= mysistem.myAds.adc_delay[mysistem.currentChannel]) {
+    channel.state = ADC_READING_PHASE;
+    channel.startTime = millis();
+    channel.adcAccumulator = 0;
+    channel.adcReadCount = 0;
+  }
+}
+
+void handleAdcReading(ChannelData& channel) {
+  if(millis() - channel.startTime < mysistem.myAds.adc_readtime[mysistem.currentChannel]) {
+    channel.adcAccumulator += mysistem.myAds.ads.readADC_SingleEnded(mysistem.currentChannel);
+    channel.adcReadCount++;
+  } else {
+    if(channel.adcReadCount > 0) {
+      mysistem.myAds.adc[mysistem.currentChannel] = channel.adcAccumulator / channel.adcReadCount;
+    } else {
+      mysistem.myAds.adc[mysistem.currentChannel] = 0;
+    }
+    channel.state = CYCLE_COMPLETE;
+  }
+}
+
+void completeChannelProcessing(ChannelData& channel) {
+  String jsonPayload = makeJsonPayload(mysistem.myAds.adc);
+  sendJsonPayload(jsonPayload);
+  
+  channel.state = CHANNEL_IDLE;
+  channel.processComplete = true;
+  
+  advanceToNextChannel();
+}
+
+void advanceToNextChannel() {
+  mysistem.currentChannel = (mysistem.currentChannel + 1) % 4;
+}
+
+String makeJsonPayload(int values[4]) {
   String s = "[";
   for (int i = 0; i < 4; ++i) {
-    s += "[";                   // başlangıç indeks
+    s += "[";
     s += "\"";
-    s += "mV";                  // birim string
+    s += "mV";
     s += "\"";
     s += ",";
-    s += String(millis()); // timestamp
+    s += String(millis());
     s += ",";
-    s += String(((float)values[i] / 32768.0) * 2.048 * 1000.0);       // mV
+    s += String(((float)values[i] / 32768.0) * 2.048 * 1000.0);
     s += ",";
-    s += String(values[i]);    // değer
+    s += String(values[i]);
     s += "]";
-    if (i < 3) s += ",";       // indeks ayırıcı
+    if (i < 3) s += ",";
   }
   s += "]";
-  s += "\n"; // newline ile bitiriyoruz, Python tarafı buna göre parse edecek
+  s += "\n";
   return s;
 }
 
-
-void sendJsonPayload(const String &payload) { // Fixed parameter type
-  // bleuart.write bekler; String.c_str() ile char* veriyoruz
+void sendJsonPayload(const String &payload) {
   bleuart.write((uint8_t*)payload.c_str(), payload.length());
-  // debug
-  //Serial.print("Sent JSON: ");
-  //Serial.print(payload);
 }
 
-// callback invoked when central connects
-void connect_callback(uint16_t conn_handle)
-{
+// BLE Callback Functions
+void connect_callback(uint16_t conn_handle) {
   BLEConnection* connection = Bluefruit.Connection(conn_handle);
   char central_name[32] = { 0 };
   connection->getPeerName(central_name, sizeof(central_name));
   Serial.print("Connected to ");
   Serial.println(central_name);
-  myleds.toggleFlag[4]=true;//mikroişlemci bluetooth bağlantısını gerçekleştirdiyse led kapalı kalır.
+  mysistem.myLeds.leds[4].counter = 0; // Reset built-in LED counter
 }
 
-void disconnect_callback(uint16_t conn_handle, uint8_t reason)
-{
+void disconnect_callback(uint16_t conn_handle, uint8_t reason) {
   (void) conn_handle;
   (void) reason;
   Serial.println();
-  Serial.print("Disconnected, reason = 0x"); Serial.println(reason, HEX);
+  Serial.print("Disconnected, reason = 0x");
+  Serial.println(reason, HEX);
 }
 
-void startAdv(void)
-{
+void startAdv(void) {
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
   Bluefruit.Advertising.addService(bleuart);
@@ -213,35 +218,51 @@ void startAdv(void)
 }
 
 void uart_rx_callback(uint16_t conn_handle) {
-    (void) conn_handle;
-    static int brace_count = 0;
-    static bool in_string = false;
-    static bool escape = false;
+  (void) conn_handle;
+  static bool json_started = false;
+  static int brace_count = 0;
 
-    while (bleuart.available()) {
-        char c = (char)bleuart.read();
-        rxBuffer += c;
-
-        
-        if (escape) { escape = false; continue; }
-        if (c == '\\') { escape = true; continue; }
-        if (c == '"') { in_string = !in_string; }
-        if (!in_string) {
-            if (c == '{') brace_count++;
-            if (c == '}') brace_count--;
-        }
-        
-        if (brace_count == 0 && rxBuffer.length() > 0 && !callback) {
-            callback=true;
-        }
+  while (bleuart.available()) {
+    char c = (char)bleuart.read();
+    
+    if (c == '{' && !json_started) {
+      json_started = true;
+      brace_count = 0;
+      mysistem.rxBuffer = "";
     }
+    
+    if (json_started) {
+      mysistem.rxBuffer += c;
+      
+      if (c == '{') brace_count++;
+      if (c == '}') brace_count--;
+      
+      if (brace_count == 0 && mysistem.rxBuffer.length() > 2) {
+        mysistem.jsonCallback = true;
+        json_started = false;
+        break;
+      }
+    }
+  }
+}
+
+void handleBleMessages() {
+  if(mysistem.jsonCallback) {
+    mysistem.rxBuffer.trim();
+    parseJsonBuffer(mysistem.rxBuffer);
+    mysistem.rxBuffer = "";
+    mysistem.jsonCallback = false;
+  }
 }
 
 void parseJsonBuffer(const String &buffer) {
-  if (buffer.length() == 0) return; // boş string geldiyse çık
+  if (buffer.length() == 0) return;
 
+  String cleanBuffer = buffer;
+  cleanBuffer.trim();
+  
   StaticJsonDocument<2048> doc;
-  DeserializationError err = deserializeJson(doc, buffer);
+  DeserializationError err = deserializeJson(doc, cleanBuffer);
 
   if (err) {
     Serial.print("JSON parse error: ");
@@ -249,148 +270,57 @@ void parseJsonBuffer(const String &buffer) {
     return;
   }
 
-  // sequences kısmını al
+  // Update system state
+  if (doc.containsKey("state")) {
+    mysistem.systemEnabled = doc["state"] | false;
+  }
+
+  // Update channel sequences
   if (doc.containsKey("sequences") && doc["sequences"].is<JsonArray>()) {
     JsonArray arr = doc["sequences"].as<JsonArray>();
 
     for (JsonObject obj : arr) {
-      int pin      = obj["led_pin"]      | -1;
-      int openMs   = obj["time_open_ms"] | 0;
-      int delayMs  = obj["time_delay_ms"]| 0;
-      int readMs   = obj["time_read_ms"] | 0;
-      bool enabled = obj["enabled"]      | false;
+      int pin = obj["led_pin"] | -1;
+      int openMs = obj["time_open_ms"] | 0;
+      int delayMs = obj["time_delay_ms"] | 0;
+      int readMs = obj["time_read_ms"] | 0;
+      bool enabled = obj["enabled"] | false;
 
-      Serial.print("Pin: "); Serial.print(pin);
-      Serial.print(" open: "); Serial.print(openMs);
-      Serial.print(" delay: "); Serial.print(delayMs);
-      Serial.print(" read: "); Serial.print(readMs);
-      Serial.print(" enabled: "); Serial.println(enabled);
-
-      if (enabled && pin >= 0 && pin < 4) {
-        mysistem.state = true;
-        myleds.leds[pin].kalansure       = openMs;
-        mysistem.myAds.adc_delay[pin]    = delayMs;
+      pin--;
+      if (pin >= 0 && pin < 4) {
+        mysistem.myLeds.leds[pin].kalansure = openMs;
+        mysistem.myAds.adc_delay[pin] = delayMs;
         mysistem.myAds.adc_readtime[pin] = readMs;
-        mysistem.myAds.read_state[pin]   = true;
-
-        handle(pin, openMs * 1000);
-        digitalWrite(myleds.pinNos[pin], HIGH);
-      } 
-      else if (pin >= 0 && pin < 4) {
-        mysistem.myAds.read_state[pin] = false;
-        timer_stop_handle(pin);
+        mysistem.myAds.read_state[pin] = enabled;
+        
+        if (enabled) {
+          mysistem.systemEnabled = true;
+          mysistem.channels[pin].state = CHANNEL_IDLE;
+        }
       }
     }
-  } else {
-    Serial.println("JSON içinde sequences bulunamadı!");
   }
 }
 
-
-void timer_start_handle(int id){
-  switch(id){
-    case 0:
-    NRF_TIMER1->TASKS_START = 1;
-    break;
-    case 1:
-    NRF_TIMER2->TASKS_START = 1;
-    break;
-    case 2:
-    NRF_TIMER3->TASKS_START = 1;
-    break;
-    case 3:
-    NRF_TIMER4->TASKS_START = 1;
-    break;
-    default:
-    break;
-  }
-}
-
-void timer_stop_handle(int id){
-  switch(id){
-    case 0:
+// Timer interrupt handler
+extern "C" void TIMER1_IRQHandler(void) {
+  if (NRF_TIMER1->EVENTS_COMPARE[0]) {
     NRF_TIMER1->TASKS_STOP = 1;
-    break;
-    case 1:
-    NRF_TIMER2->TASKS_STOP = 1;
-    break;
-    case 2:
-    NRF_TIMER3->TASKS_STOP = 1;
-    break;
-    case 3:
-    NRF_TIMER4->TASKS_STOP = 1;
-    break;
-    default:
-    break;
+    NRF_TIMER1->EVENTS_COMPARE[0] = 0;
+    mysistem.timerExpired = true;
   }
 }
 
-void timer_interrupt_set(int id){
-  switch(id){
-    case 0:
-    NRF_TIMER1->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
-    break;
-    case 1:
-    NRF_TIMER2->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
-    break;
-    case 2:
-    NRF_TIMER3->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
-    break;
-    case 3:
-    NRF_TIMER4->INTENSET = TIMER_INTENSET_COMPARE0_Msk;
-    break;
-    default:
-    break;
-  }
+extern "C"
+
+void timer1_init() {
+  NRF_TIMER1->TASKS_STOP = 1;
+  NRF_TIMER1->MODE = TIMER_MODE_MODE_Timer;
+  NRF_TIMER1->BITMODE = TIMER_BITMODE_BITMODE_32Bit << TIMER_BITMODE_BITMODE_Pos;
+  NRF_TIMER1->PRESCALER = 4;
+
+  NRF_TIMER1->INTENSET = TIMER_INTENSET_COMPARE0_Enabled << TIMER_INTENSET_COMPARE0_Pos;
+  NRF_TIMER1->SHORTS = TIMER_SHORTS_COMPARE0_CLEAR_Enabled << TIMER_SHORTS_COMPARE0_CLEAR_Pos;
+
+  NVIC_EnableIRQ(TIMER1_IRQn);
 }
-
-
-void handle(int8_t led_id,uint32_t time_open_v){
-  switch(led_id){
-    case 0:
-    NRF_TIMER1->TASKS_STOP = 1;
-    NRF_TIMER1->TASKS_CLEAR = 1;
-    NRF_TIMER1->CC[0]=time_open_v;
-    break;
-
-    case 1:
-    NRF_TIMER2->TASKS_STOP = 1;
-    NRF_TIMER2->TASKS_CLEAR = 1;
-    NRF_TIMER2->CC[0]=time_open_v;
-    break;
-
-    case 2:
-    NRF_TIMER3->TASKS_STOP = 1;
-    NRF_TIMER3->TASKS_CLEAR = 1;
-    NRF_TIMER3->CC[0]=time_open_v;
-    break;
-
-    case 3:
-    NRF_TIMER4->TASKS_STOP = 1;
-    NRF_TIMER4->TASKS_CLEAR = 1;
-    NRF_TIMER4->CC[0]=time_open_v;
-    break;
-
-    default:
-    break;
-  }
-}
-
-
-void printResetReason() {
-  uint32_t reas = NRF_POWER->RESETREAS;
-  Serial.print("RESETREAS = 0x"); Serial.println(reas, HEX);
-  // clear
-  NRF_POWER->RESETREAS = reas;
-}
-
-
-
-/*
-gelen veri yapısı
-state
-timeopen led'in yanma süresi ms
-timedelay led yanmaya başladıktan timedelay ms sonra adc verisini okumaya başla
-time read   
-pin (0,1,2,3), -1 için hepsi olsun
-*/

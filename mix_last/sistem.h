@@ -2,23 +2,35 @@
 #define sistem_h
 
 #include "ads.h"
+#include "ledController.h"
 
-struct prc{
-  bool led;
-  bool delay;
-  bool adc_read;
+enum ChannelState {
+  CHANNEL_IDLE,
+  LED_ON,
+  DELAY_COUNTING,
+  ADC_READING_PHASE,
+  CYCLE_COMPLETE
 };
 
-struct sistem{
+struct ChannelData {
+  ChannelState state;
+  unsigned long startTime;
+  unsigned long adcAccumulator;
+  int adcReadCount;
+  bool processComplete;
+};
+
+struct sistem {
   String SisteminAdi;
   String versiyon;
   ads1115 myAds;
-  prc process[4];
-  int process_itr = 0;
-  int process_pos = 0;
-  bool state;
+  ledController myLeds;
+  ChannelData channels[4];
+  int currentChannel;
+  bool systemEnabled;
+  volatile bool timerExpired;
+  String rxBuffer;
+  bool jsonCallback;
 };
-
-
 
 #endif
